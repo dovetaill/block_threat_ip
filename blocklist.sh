@@ -1,11 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# 脚本名称: blocklist.sh (V7 - 智能配置与版本检查版)
+# 脚本名称: blocklist.sh (V8 - 完全静默安装版)
 # 脚本功能: 自动整合静态IP/ASN黑名单与Fail2ban动态封禁列表，并持久化。
-# V7 更新:  - 自动为新安装的 Fail2ban 创建基础的 sshd 防护配置 (jail.local)。
-#           - 检查已安装的 Fail2ban 版本，若低于推荐版本则提示用户。
-#           - 不会卸载用户已有的 Fail2ban，遵循非破坏性原则。
+# V8 更新:  - 增加了 debconf-set-selections 来预设答案，实现 iptables-persistent 的完全静默安装。
 # 使用方法: sudo ./blocklist.sh
 # ==============================================================================
 
@@ -25,9 +23,7 @@ log_action() {
 
 # --- 版本比较函数 ---
 # $1: 版本1, $2: 版本2
-# 返回 0 如果 版本1 = 版本2
-# 返回 1 如果 版本1 > 版本2
-# 返回 2 如果 版本1 < 版本2
+# 返回 0 如果 版本1 = 版本2, 1 如果 版本1 > 版本2, 2 如果 版本1 < 版本2
 version_compare() {
     if [[ "$1" == "$2" ]]; then return 0; fi
     local IFS=.
@@ -46,7 +42,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 sudo touch "$LOG_FILE"; sudo chmod 644 "$LOG_FILE"
-log_action "--- 脚本开始执行 (V7) ---"
+log_action "--- 脚本开始执行 (V8) ---"
 
 # --- 依赖安装 ---
 log_action "--- 步骤 1: 检查并安装所需依赖 ---"
@@ -63,7 +59,6 @@ else
     log_action "错误: 无法识别的操作系统。"; exit 1
 fi
 
-# 处理已安装的 Fail2ban
 if command -v fail2ban-server &> /dev/null; then
     CURRENT_VERSION=$(fail2ban-server --version 2>/dev/null | awk '{print $2}')
     if [ -n "$CURRENT_VERSION" ]; then
@@ -74,7 +69,6 @@ if command -v fail2ban-server &> /dev/null; then
             log_action "      脚本将继续运行，但建议您手动升级 Fail2ban 以获得更好的性能和安全性。"
         fi
     fi
-    # 从待安装列表中移除 fail2ban
     PACKAGES=$(echo "$PACKAGES" | sed 's/fail2ban//')
 fi
 
@@ -94,14 +88,19 @@ fi
 if [ -n "$NEEDS_INSTALL" ]; then
     log_action "正在准备安装:${NEEDS_INSTALL}"
     if [ "$PKG_MANAGER" == "apt-get" ]; then
+        # ★★★ 修复点：预设 debconf 答案以实现静默安装 ★★★
+        if [[ "$NEEDS_INSTALL" == *"iptables-persistent"* ]]; then
+            log_action "预配置 iptables-persistent 以实现非交互式安装..."
+            echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | sudo debconf-set-selections
+            echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | sudo debconf-set-selections
+        fi
         export DEBIAN_FRONTEND=noninteractive
         sudo $PKG_MANAGER update -y
         sudo $PKG_MANAGER install -y $NEEDS_INSTALL
-    else
+    else # yum
         if systemctl is-active --quiet firewalld; then
             log_action "检测到 firewalld 正在运行，将禁用它以使用 iptables。"
-            sudo systemctl stop firewalld
-            sudo systemctl disable firewalld
+            sudo systemctl stop firewalld; sudo systemctl disable firewalld
         fi
         sudo $PKG_MANAGER install -y $NEEDS_INSTALL
     fi
@@ -142,18 +141,15 @@ else
     log_action "Fail2ban 服务正在运行。"
 fi
 
-
 # --- IPSET 初始化 ---
 log_action "\n--- 步骤 2: 初始化 IPSET 集合 ---"
 sudo ipset create $IPSET_V4_NAME hash:net -exist
 sudo ipset create $IPSET_V6_NAME hash:net family inet6 -exist
 log_action "IPSET 集合 '$IPSET_V4_NAME' 和 '$IPSET_V6_NAME' 已准备就绪。"
 
-
 # --- Fail2ban 集成 ---
 log_action "\n--- 步骤 3: 从 Fail2ban 导入封禁IP ---"
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
-    
     log_action "正在读取 Fail2ban 当前封禁的 IP..."
     JAILS=$(sudo fail2ban-client status | grep "Jail list:" | sed -e 's/.*Jail list:[ \t]*//' -e 's/,//g')
     BANNED_NOW_COUNT=0
@@ -168,12 +164,10 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
         done
     done
     log_action "从 Fail2ban 当前活动封禁中处理了 $BANNED_NOW_COUNT 个IP。"
-
     log_action "正在分析 Fail2ban 历史封禁记录..."
     HISTORICAL_IPS=""
     HISTORICAL_COUNT=0
     GREP_PATTERN='fail2ban.actions.*Ban'
-
     if command -v journalctl &> /dev/null; then
         log_action "  -> 使用 journalctl 查询 fail2ban 服务日志..."
         HISTORICAL_IPS=$(sudo journalctl -u fail2ban.service --no-pager --since "1 year ago" | grep "$GREP_PATTERN" | awk '{print $NF}')
@@ -182,20 +176,14 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
         declare -a log_paths=("/var/log/fail2ban.log" "/var/log/fail2ban/fail2ban.log")
         LOG_BASE=""
         for path in "${log_paths[@]}"; do
-            if [ -f "$path" ]; then
-                LOG_BASE=$(dirname "$path")/$(basename "$path" .log)
-                break
-            fi
+            if [ -f "$path" ]; then LOG_BASE=$(dirname "$path")/$(basename "$path" .log); break; fi
         done
-
         if [ -n "$LOG_BASE" ]; then
-            log_action "  -> 发现日志文件, 正在扫描 ${LOG_BASE}*"
-            HISTORICAL_IPS=$(sudo zgrep "$GREP_PATTERN" "${LOG_BASE}"* 2>/dev/null | awk '{print $NF}')
+            log_action "  -> 发现日志文件, 正在扫描 ${LOG_BASE}*"; HISTORICAL_IPS=$(sudo zgrep "$GREP_PATTERN" "${LOG_BASE}"* 2>/dev/null | awk '{print $NF}')
         else
             log_action "  -> 警告: 未在标准位置找到 Fail2ban 日志文件，跳过历史记录分析。"
         fi
     fi
-    
     if [ -n "$HISTORICAL_IPS" ]; then
         UNIQUE_IPS=$(echo "$HISTORICAL_IPS" | sort -u)
         for ip in $UNIQUE_IPS; do
@@ -211,11 +199,9 @@ else
     log_action "警告: Fail2ban 未安装或未运行，跳过 Fail2ban 集成步骤。"
 fi
 
-
 # --- 静态文件处理 ---
 log_action "\n--- 步骤 4: 读取 .txt 文件并处理静态屏蔽列表 ---"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-
 for file in "$SCRIPT_DIR"/*.txt; do
     if [ ! -f "$file" ]; then continue; fi
     log_action "正在处理静态文件: $(basename "$file")"
@@ -239,7 +225,6 @@ for file in "$SCRIPT_DIR"/*.txt; do
 done
 log_action "所有 .txt 文件处理完毕。"
 
-
 # --- IPTABLES 规则应用 ---
 log_action "\n--- 步骤 5: 应用 IPTABLES 规则 ---"
 if ! sudo iptables -C INPUT -m set --match-set $IPSET_V4_NAME src -j DROP > /dev/null 2>&1; then
@@ -254,7 +239,6 @@ if ! sudo ip6tables -C INPUT -m set --match-set $IPSET_V6_NAME src -j DROP > /de
 else
     log_action "IPv6 黑名单规则已存在。"
 fi
-
 
 # --- 规则持久化 ---
 log_action "\n--- 步骤 6: 持久化防火墙规则 ---"
