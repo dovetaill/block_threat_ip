@@ -1,18 +1,17 @@
-
 #!/bin/bash
 
 # ==============================================================================
 # 安装脚本: install.sh
 # 功能: 自动从 GitHub 下载最新的 blocklist.sh 脚本和所有 .txt 黑名单文件，
 #       并以 root 权限执行主脚本来部署防火墙规则。
-# 使用方法: curl -sSL https://raw.githubusercontent.com/dovetaill/block_threat_ip/main/install.sh | sudo bash
+# 使用方法: curl -sSL https://raw.githubusercontent.com/dovetaill/block_threat_ip/master/install.sh | sudo bash
 # ==============================================================================
 
 # --- 设置 ---
 # GitHub 项目信息
 GITHUB_USER="dovetaill"
 GITHUB_REPO="block_threat_ip"
-BRANCH="main" # 或者你的主分支名
+BRANCH="master" # ★★★ 这里是唯一的修改点 ★★★
 
 # 本地工作目录
 INSTALL_DIR="/opt/block_threat_ip"
@@ -53,7 +52,6 @@ log "下载 blocklist.sh 成功。"
 
 # 下载所有 .txt 文件 (通过 GitHub API 获取文件列表)
 API_URL="https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/?ref=${BRANCH}"
-# 使用 curl 获取文件列表，grep 筛选出 .txt 文件，awk 提取下载链接，然后用 xargs 下载
 curl -s "$API_URL" | grep "download_url" | grep "\.txt" | awk '{print $2}' | tr -d ',"' | xargs -n 1 curl -sSL -O
 log "下载所有 .txt 黑名单文件成功。"
 
