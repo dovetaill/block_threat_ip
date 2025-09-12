@@ -11,7 +11,7 @@
 # GitHub 项目信息
 GITHUB_USER="dovetaill"
 GITHUB_REPO="block_threat_ip"
-BRANCH="master" # ★★★ 这里是唯一的修改点 ★★★
+BRANCH="master"
 
 # 本地工作目录
 INSTALL_DIR="/opt/block_threat_ip"
